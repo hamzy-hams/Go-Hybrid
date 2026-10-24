@@ -36,7 +36,7 @@ impl<'a> Checker<'a> {
     /// After `process_local`: flag every name bound to `&m[k]` (including
     /// parenthesized `(&m[k])` and `&(m[k])`).
     pub(crate) fn mark_slot_loans_local(&self, st: &mut FnState, l: &LocalDecl) {
-        if l.names.len() != l.values.len() {
+        if !matches!(l.kind, hy_syntax::LocalKind::Define | hy_syntax::LocalKind::Let) || l.ty.is_some() || l.names.len() != l.values.len() {
             return;
         }
         for (name, val) in l.names.iter().zip(l.values.iter()) {
@@ -62,7 +62,7 @@ impl<'a> Checker<'a> {
         }
         for (t, v) in targets.iter().zip(values.iter()) {
             if let PlaceKind::Ident(name) = &t.kind {
-                let is_loan = is_slot_loan_expr(v);
+                let is_loan = is_slot_loan_expr(v) && targets.iter().all(|t| matches!(&t.kind, PlaceKind::Ident(_)));
                 if let Some(b) = st.env_lookup_mut(name) {
                     b.slot_loan = is_loan;
                 }
@@ -164,7 +164,7 @@ impl<'a> Checker<'a> {
             Stmt::Local(l) => {
                 for v in &l.values {
                     // `x := &m[k]` is the O8 slot-loan initializer: legal.
-                    self.walk_addr_of_loan_projections(st, v, include_direct_ident, true);
+                    self.walk_addr_of_loan_projections(st, v, include_direct_ident, matches!(l.kind, hy_syntax::LocalKind::Const) || (matches!(l.kind, hy_syntax::LocalKind::Define | hy_syntax::LocalKind::Let) && l.ty.is_none() && l.names.len() == l.values.len()));
                 }
             }
             Stmt::Assign {
@@ -175,7 +175,7 @@ impl<'a> Checker<'a> {
                 }
                 for v in values {
                     // `x = &m[k]` is the slot-loan re-binding: legal.
-                    self.walk_addr_of_loan_projections(st, v, include_direct_ident, true);
+                    self.walk_addr_of_loan_projections(st, v, include_direct_ident, (targets.len() == values.len() && targets.iter().all(|t| matches!(&t.kind, PlaceKind::Ident(_)))) || (targets.iter().any(|t| matches!(&t.kind, PlaceKind::Field { .. })) && self.map_slot_borrow_span(st, v).is_some()));
                 }
             }
             Stmt::Expr { expr, .. } => {
@@ -387,7 +387,7 @@ impl<'a> Checker<'a> {
                 for f in fields {
                     // A6 (`holder{p: &m[k]}`) is already HYB-E3103 —
                     // borrow-in-field; recurse for nested borrows only.
-                    if self.map_slot_borrow_span(st, &f.value).is_some() {
+                    if self.diags.iter().any(|d| d.code == "HYB-E3103") && self.map_slot_borrow_span(st, &f.value).is_some() {
                         continue;
                     }
                     self.check_expr_addr_of_loan_projections(st, &f.value, include_direct_ident);
